@@ -1,0 +1,144 @@
+#!/bin/sh
+# Start the Star Wars: Battlefront II (2005) dedicated server (START_EXE).
+#
+# There is no separate server program: BattlefrontII.exe hosts a dedicated server with
+# `/autonet dedicated`. This runs it from GameData/ under Wine with /norender and /nosound, so it needs
+# no display, and /lan, which makes it host on the LAN (UDP 3658, LAN browser on 3656) instead of
+# registering with the GameSpy master server, which no longer exists. The map rotation comes last on
+# the command line.
+#
+# The game prints nothing to stdout. SWBF2_EXTRA_ARGS and any START_ARGS are added before the maps.
+set -e
+
+# START_ARGS arrive as arguments; keep them before the map parsing below reuses "$@"
+start_args="$*"
+
+root="${SERVER_ROOT:-/config/Merged}"
+game="$root/GameData"
+
+if [ ! -f "$game/BattlefrontII.exe" ]; then
+    echo "GameData/BattlefrontII.exe not found in $root. Put a Star Wars: Battlefront II install in /config/Server." >&2
+    exit 1
+fi
+
+is_true() {
+    case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+        true|1|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+is_number() {
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# A map code is <world><n><era>_<mode>, e.g. cor1c_con: era c (Clone Wars) or g (Galactic Civil War),
+# then the game mode. These are the multiplayer missions in data/_lvl_pc/mission.lvl (the _c
+# single-player campaign missions are left out). A code that isn't stock is accepted if an add-on in
+# GameData/addon/ names it (mod maps).
+STOCK_MAPS=" cor1c_con cor1c_ctf cor1g_con cor1g_ctf dag1c_con dag1c_ctf dag1g_con dag1g_ctf dea1c_1flag dea1c_con dea1g_1flag dea1g_con end1g_1flag end1g_con end1g_hunt fel1c_1flag fel1c_con fel1g_1flag fel1g_con geo1c_con geo1c_ctf geo1c_hunt geo1c_xl hot1g_1flag hot1g_con hot1g_hunt hot1g_uber hot1g_xl kam1c_1flag kam1c_con kam1g_1flag kam1g_con kas2c_con kas2c_ctf kas2c_hunt kas2c_uber kas2c_xl kas2g_con kas2g_ctf kas2g_xl mus1c_con mus1c_ctf mus1g_con mus1g_ctf myg1c_con myg1c_ctf myg1g_con myg1g_ctf nab2c_con nab2c_ctf nab2c_hunt nab2g_con nab2g_ctf pol1c_con pol1c_ctf pol1g_con pol1g_ctf spa1g_1flag spa1g_ass spa3c_1flag spa3c_ass spa6c_1flag spa6c_ass spa6c_cmn spa7c_1flag spa7c_ass spa7c_cmn spa8g_1flag spa8g_ass spa8g_cmn spa9g_1flag spa9g_ass spa9g_cmn tan1c_1flag tan1c_con tan1g_1flag tan1g_con tat2c_con tat2c_ctf tat2g_con tat2g_ctf tat2g_eli tat2g_hunt tat3c_1flag tat3c_con tat3g_1flag tat3g_con uta1c_1flag uta1c_con uta1g_1flag uta1g_con yav1c_1flag yav1c_con yav1g_1flag yav1g_con "
+
+addon_has() {
+    [ -d "$game/addon" ] || [ -d "$game/AddOn" ] || return 1
+    find "$game" -maxdepth 1 -iname addon -type d -exec grep -rqa --include='*.lvl' --include='*.LVL' -e "$1" {} + 2>/dev/null
+}
+
+check_map() {
+    case "$STOCK_MAPS" in
+        *" $1 "*) return 0 ;;
+    esac
+    if addon_has "$1"; then
+        echo "SWBF2_MAPS: '$1' is not a stock map; found it in GameData/addon/" >&2
+        return 0
+    fi
+    echo "SWBF2_MAPS: unknown map '$1'. Stock codes:$STOCK_MAPS" >&2
+    return 1
+}
+
+maps=""
+count=0
+IFS_OLD="$IFS"
+IFS=';'
+for entry in ${SWBF2_MAPS:-cor1c_con}; do
+    IFS="$IFS_OLD"
+    # shellcheck disable=SC2086 # split the entry into map and the two numbers
+    set -- $entry
+    IFS=';'
+    [ "$#" -eq 0 ] && continue
+
+    map="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    case "$map" in
+        [a-z][a-z][a-z][0-9][a-z]_[a-z0-9]*) ;;
+        *)
+            echo "SWBF2_MAPS: '$1' is not a map code (e.g. cor1c_con, kas2g_ctf, hot1g_hunt)." >&2
+            exit 1
+            ;;
+    esac
+    check_map "$map" || exit 1
+
+    case "$#" in
+        1) maps="$maps $map" ;;
+        3)
+            if ! is_number "$2" || ! is_number "$3"; then
+                echo "SWBF2_MAPS: the numbers after '$map' must be numbers: '$entry'" >&2
+                exit 1
+            fi
+            maps="$maps $map $2 $3"
+            ;;
+        *)
+            echo "SWBF2_MAPS: expected 'map' or 'map n1 n2', got '$entry'" >&2
+            exit 1
+            ;;
+    esac
+    count=$((count + 1))
+done
+IFS="$IFS_OLD"
+
+if [ "$count" -eq 0 ]; then
+    echo "SWBF2_MAPS is empty." >&2
+    exit 1
+fi
+
+# Build the command line. Arguments with spaces (the server name) stay single arguments.
+set -- /norender /nosound /lan /autonet dedicated \
+    /gamename "${SWBF2_SERVER_NAME:-Star Wars Battlefront II Server}"
+
+[ -n "$SWBF2_MAX_PLAYERS" ]         && set -- "$@" /playerlimit "$SWBF2_MAX_PLAYERS"
+[ -n "$SWBF2_MIN_PLAYERS" ]         && set -- "$@" /playercount "$SWBF2_MIN_PLAYERS"
+[ -n "$SWBF2_BOTS" ]                && set -- "$@" /bots "$SWBF2_BOTS"
+[ -n "$SWBF2_DIFFICULTY" ]          && set -- "$@" /difficulty "$SWBF2_DIFFICULTY"
+[ -n "$SWBF2_SPAWN_INVINCIBILITY" ] && set -- "$@" /spawn "$SWBF2_SPAWN_INVINCIBILITY"
+[ -n "$SWBF2_TPS" ]                 && set -- "$@" /tps "$SWBF2_TPS"
+[ -n "$SWBF2_THROTTLE" ]            && set -- "$@" /throttle "$SWBF2_THROTTLE"
+if [ -n "$SWBF2_HEROES" ]; then
+    if is_true "$SWBF2_HEROES"; then set -- "$@" /heroes 1; else set -- "$@" /heroes 0; fi
+fi
+is_true "${SWBF2_TEAM_DAMAGE:-true}"  || set -- "$@" /noteamdamage
+is_true "${SWBF2_AUTO_AIM:-true}"     || set -- "$@" /noaim
+is_true "${SWBF2_SIDE_SELECT:-false}" && set -- "$@" /sideselect
+is_true "${SWBF2_RANDOMIZE:-false}"   && set -- "$@" /randomize
+
+# The passwords are left out of the echoed command line
+shown="$*"
+[ -n "$SWBF2_PASSWORD" ]       && { set -- "$@" /password "$SWBF2_PASSWORD"; shown="$shown /password ****"; }
+[ -n "$SWBF2_ADMIN_PASSWORD" ] && { set -- "$@" /adminpw "$SWBF2_ADMIN_PASSWORD"; shown="$shown /adminpw ****"; }
+
+# shellcheck disable=SC2086 # SWBF2_EXTRA_ARGS, START_ARGS and the map list are split on purpose
+set -- "$@" $SWBF2_EXTRA_ARGS $start_args $maps
+shown="$shown $SWBF2_EXTRA_ARGS $start_args $maps"
+
+echo "Starting: BattlefrontII.exe $shown"
+echo "Rotation: $count map(s)"
+
+export WINE_WORKDIR="$game"
+
+# Wine doesn't pass SIGTERM on to the game, so `docker stop` would wait out its timeout. Run the
+# server in the background and end it with wineserver -k instead.
+wine-run BattlefrontII.exe "$@" &
+pid=$!
+trap 'wineserver -k' TERM INT
+wait "$pid" || true
+wait "$pid"
